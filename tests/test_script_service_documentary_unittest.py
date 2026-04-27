@@ -28,7 +28,12 @@ class ScriptGeneratorDocumentaryTests(unittest.IsolatedAsyncioTestCase):
             result = await generator.generate_script(
                 video_path="demo.mp4",
                 video_theme="荒野生存",
+                movie_title="《荒野生存》",
                 custom_prompt="请聚焦生存动作",
+                subtitle_content="1\n00:00:00,000 --> 00:00:02,000\n你好\n",
+                subtitle_file_path="/tmp/demo.srt",
+                known_characters="老李：队长",
+                plot_context_prompt="custom prompt",
                 frame_interval_input=3,
                 vision_batch_size=6,
                 vision_llm_provider="openai",
@@ -44,7 +49,12 @@ class ScriptGeneratorDocumentaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(6, called_kwargs["vision_batch_size"])
         self.assertEqual("openai", called_kwargs["vision_llm_provider"])
         self.assertEqual("荒野生存", called_kwargs["video_theme"])
+        self.assertEqual("《荒野生存》", called_kwargs["movie_title"])
         self.assertEqual("请聚焦生存动作", called_kwargs["custom_prompt"])
+        self.assertEqual("1\n00:00:00,000 --> 00:00:02,000\n你好\n", called_kwargs["subtitle_content"])
+        self.assertEqual("/tmp/demo.srt", called_kwargs["subtitle_file_path"])
+        self.assertEqual("老李：队长", called_kwargs["known_characters"])
+        self.assertEqual("custom prompt", called_kwargs["plot_context_prompt"])
         self.assertIs(called_kwargs["progress_callback"], callback)
 
     async def test_generate_script_forwards_unset_values_as_none(self):
@@ -64,6 +74,11 @@ class ScriptGeneratorDocumentaryTests(unittest.IsolatedAsyncioTestCase):
             await generator.generate_script(video_path="demo.mp4")
 
         called_kwargs = service.generate_documentary_script.await_args.kwargs
+        self.assertEqual("", called_kwargs["movie_title"])
+        self.assertEqual("", called_kwargs["subtitle_content"])
+        self.assertEqual("", called_kwargs["subtitle_file_path"])
+        self.assertEqual("", called_kwargs["known_characters"])
+        self.assertEqual("", called_kwargs["plot_context_prompt"])
         self.assertIsNone(called_kwargs["frame_interval_input"])
         self.assertIsNone(called_kwargs["vision_batch_size"])
         self.assertIsNone(called_kwargs["vision_llm_provider"])
@@ -119,6 +134,10 @@ class DocumentaryFrameAnalysisServiceScriptGenerationTests(unittest.IsolatedAsyn
 
             with patch.object(
                 DocumentaryFrameAnalysisService,
+                "_maybe_generate_plot_context",
+                AsyncMock(return_value=None),
+            ), patch.object(
+                DocumentaryFrameAnalysisService,
                 "analyze_video",
                 AsyncMock(return_value={"analysis_json_path": str(analysis_path)}),
             ), patch.dict(
@@ -162,6 +181,10 @@ class DocumentaryFrameAnalysisServiceScriptGenerationTests(unittest.IsolatedAsyn
             analysis_path.write_text(json.dumps(analysis_payload, ensure_ascii=False), encoding="utf-8")
 
             with patch.object(
+                DocumentaryFrameAnalysisService,
+                "_maybe_generate_plot_context",
+                AsyncMock(return_value=None),
+            ), patch.object(
                 DocumentaryFrameAnalysisService,
                 "analyze_video",
                 AsyncMock(return_value={"analysis_json_path": str(analysis_path)}),
@@ -219,6 +242,12 @@ class DocumentaryFrameAnalysisServiceScriptGenerationTests(unittest.IsolatedAsyn
 
     async def test_generate_documentary_script_includes_theme_and_custom_prompt_for_narration(self):
         service = DocumentaryFrameAnalysisService()
+        plot_context = {
+            "movie_title": "《野生动物纪录片》",
+            "plot_summary": "猫在夜里警觉观察环境。",
+            "timeline": [],
+            "characters": [],
+        }
         analysis_payload = {
             "batches": [
                 {
@@ -238,6 +267,10 @@ class DocumentaryFrameAnalysisServiceScriptGenerationTests(unittest.IsolatedAsyn
             analysis_path.write_text(json.dumps(analysis_payload, ensure_ascii=False), encoding="utf-8")
 
             with patch.object(
+                DocumentaryFrameAnalysisService,
+                "_maybe_generate_plot_context",
+                AsyncMock(return_value=plot_context),
+            ), patch.object(
                 DocumentaryFrameAnalysisService,
                 "analyze_video",
                 AsyncMock(return_value={"analysis_json_path": str(analysis_path)}),
@@ -261,8 +294,66 @@ class DocumentaryFrameAnalysisServiceScriptGenerationTests(unittest.IsolatedAsyn
 
         narration_input = mocked_generate.call_args.args[0]
         self.assertIn("## 创作上下文", narration_input)
+        self.assertIn("## 剧情上下文", narration_input)
         self.assertIn("视频主题：野生动物纪录片", narration_input)
         self.assertIn("补充创作要求：重点描述危险信号", narration_input)
+        self.assertEqual(
+            json.dumps(plot_context, ensure_ascii=False, indent=2),
+            mocked_generate.call_args.kwargs["plot_context"],
+        )
+
+    async def test_generate_documentary_script_reuses_precomputed_plot_context(self):
+        service = DocumentaryFrameAnalysisService()
+        plot_context = {
+            "movie_title": "《野生动物纪录片》",
+            "plot_summary": "猫在夜里警觉观察环境。",
+            "timeline": [],
+            "characters": [],
+        }
+        analysis_payload = {
+            "batches": [
+                {
+                    "batch_index": 0,
+                    "time_range": "00:00:00,000-00:00:03,000",
+                    "overall_activity_summary": "测试摘要",
+                    "fallback_summary": "",
+                    "frame_observations": [
+                        {"timestamp": "00:00:00,000", "observation": "镜头里有一只猫"},
+                    ],
+                }
+            ]
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            analysis_path = Path(temp_dir) / "frame_analysis_test.json"
+            analysis_path.write_text(json.dumps(analysis_payload, ensure_ascii=False), encoding="utf-8")
+
+            with patch.object(
+                DocumentaryFrameAnalysisService,
+                "generate_plot_context",
+                AsyncMock(side_effect=AssertionError("should not be called")),
+            ), patch.object(
+                DocumentaryFrameAnalysisService,
+                "analyze_video",
+                AsyncMock(return_value={"analysis_json_path": str(analysis_path)}),
+            ), patch.dict(
+                "app.services.documentary.frame_analysis_service.config.app",
+                {
+                    "text_llm_provider": "openai",
+                    "text_openai_api_key": "test-key",
+                    "text_openai_model_name": "test-model",
+                    "text_openai_base_url": "https://example.com/v1",
+                },
+            ), patch(
+                "app.services.documentary.frame_analysis_service.generate_narration",
+                return_value='{"items":[{"timestamp":"00:00:00,000-00:00:03,000","picture":"镜头里有一只猫","narration":"一只猫警觉地望向镜头。"}]}',
+            ):
+                result = await service.generate_documentary_script(
+                    video_path="demo.mp4",
+                    plot_context_data=plot_context,
+                )
+
+        self.assertEqual(1, len(result))
 
     async def test_analyze_video_forwards_explicit_empty_base_url_without_config_fallback(self):
         service = DocumentaryFrameAnalysisService()

@@ -24,7 +24,7 @@ class NarrationGenerationPrompt(TextPrompt):
             model_type=ModelType.TEXT,
             output_format=OutputFormat.JSON,
             tags=["短视频", "解说文案", "病毒传播", "文案生成", "通用模板"],
-            parameters=["video_frame_description"]
+            parameters=["video_frame_description", "plot_context"]
         )
         super().__init__(metadata)
 
@@ -65,7 +65,11 @@ class NarrationGenerationPrompt(TextPrompt):
 ${video_frame_description}
 </video_frame_description>
 
-现在，请基于 <video_frame_description> 中的视频内容，创作一段符合病毒式传播规律的解说文案。
+<plot_context>
+${plot_context}
+</plot_context>
+
+现在，请基于 <video_frame_description> 中的视频内容创作解说文案；如果 <plot_context> 提供了剧情背景、角色关系或时间轴，请把它作为高优先级剧情事实约束，用来提升角色称呼准确性、事件因果连贯性和解说视角稳定性。
 
 <creation_guide>
 **创作步骤：**
@@ -110,4 +114,6 @@ ${video_frame_description}
 8. 控制单句长度在 15-20 字，确保口语化表达
 9. 在视觉高潮处适当精简文案，让画面自己说话
 10. 整体风格要符合当前主流短视频平台的受欢迎特征
+11. 若 <plot_context> 中存在角色图谱，优先使用其中统一后的角色名称和别名体系
+12. 若 <plot_context> 与画面信息存在冲突，以画面和时间戳为准，不要虚构未展示的动作
 </restriction>"""

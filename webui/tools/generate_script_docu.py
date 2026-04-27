@@ -82,7 +82,13 @@ def generate_script_docu(params):
                 service.generate_documentary_script(
                     video_path=params.video_origin_path,
                     video_theme=st.session_state.get("video_theme", ""),
+                    movie_title=st.session_state.get("movie_title", ""),
                     custom_prompt=st.session_state.get("custom_prompt", ""),
+                    plot_context_data=st.session_state.get("plot_context_result"),
+                    subtitle_content=st.session_state.get("subtitle_content", ""),
+                    subtitle_file_path=st.session_state.get("subtitle_path", ""),
+                    known_characters=st.session_state.get("known_characters", ""),
+                    plot_context_prompt=st.session_state.get("plot_context_prompt", ""),
                     frame_interval_input=frame_interval_input,
                     vision_batch_size=vision_batch_size,
                     vision_llm_provider=vision_llm_provider,

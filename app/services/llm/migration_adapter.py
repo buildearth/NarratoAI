@@ -79,7 +79,13 @@ class LegacyLLMAdapter:
         return VisionAnalyzerAdapter(provider, api_key, model, base_url)
     
     @staticmethod
-    def generate_narration(markdown_content: str, api_key: str, base_url: str, model: str) -> str:
+    def generate_narration(
+        markdown_content: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        plot_context: str = "",
+    ) -> str:
         """
         生成解说文案 - 兼容原有接口
 
@@ -98,7 +104,8 @@ class LegacyLLMAdapter:
                 category="documentary",
                 name="narration_generation",
                 parameters={
-                    "video_frame_description": markdown_content
+                    "video_frame_description": markdown_content,
+                    "plot_context": plot_context or "",
                 }
             )
 
@@ -327,6 +334,12 @@ def create_vision_analyzer(provider: str, api_key: str, model: str, base_url: st
     return LegacyLLMAdapter.create_vision_analyzer(provider, api_key, model, base_url)
 
 
-def generate_narration(markdown_content: str, api_key: str, base_url: str, model: str) -> str:
+def generate_narration(
+    markdown_content: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    plot_context: str = "",
+) -> str:
     """生成解说文案 - 全局函数"""
-    return LegacyLLMAdapter.generate_narration(markdown_content, api_key, base_url, model)
+    return LegacyLLMAdapter.generate_narration(markdown_content, api_key, base_url, model, plot_context)

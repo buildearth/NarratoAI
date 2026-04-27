@@ -128,7 +128,7 @@ def parse_frame_analysis_to_markdown(json_file_path):
         return f"处理JSON文件时出错: {traceback.format_exc()}"
 
 
-def generate_narration(markdown_content, api_key, base_url, model):
+def generate_narration(markdown_content, api_key, base_url, model, plot_context=""):
     """
     调用大模型API根据视频帧分析的Markdown内容生成解说文案 - 已重构为使用新的LLM服务架构
 
@@ -148,10 +148,10 @@ def generate_narration(markdown_content, api_key, base_url, model):
         logger.warning(f"使用新LLM服务失败，回退到旧实现: {str(e)}")
 
         # 回退到旧的实现以确保兼容性
-        return _generate_narration_legacy(markdown_content, api_key, base_url, model)
+        return _generate_narration_legacy(markdown_content, api_key, base_url, model, plot_context)
 
 
-def _generate_narration_legacy(markdown_content, api_key, base_url, model):
+def _generate_narration_legacy(markdown_content, api_key, base_url, model, plot_context=""):
     """
     旧的解说文案生成实现 - 保留作为备用方案
 
@@ -167,7 +167,8 @@ def _generate_narration_legacy(markdown_content, api_key, base_url, model):
             category="documentary",
             name="narration_generation",
             parameters={
-                "video_frame_description": markdown_content
+                "video_frame_description": markdown_content,
+                "plot_context": plot_context or "",
             }
         )
 

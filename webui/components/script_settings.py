@@ -3,6 +3,7 @@ import glob
 import json
 import time
 import traceback
+import asyncio
 import streamlit as st
 from loguru import logger
 
@@ -291,6 +292,28 @@ def render_short_generate_options(tr):
 def render_video_details(tr):
     """画面解说 渲染视频主题和提示词"""
     video_theme = st.text_input(tr("Video Theme"))
+    movie_title = st.text_input(
+        tr("电影名称"),
+        value=st.session_state.get("movie_title", ""),
+        help=tr("用于生成剧情简介、时间轴和全局角色图谱的正式片名"),
+        key="movie_title_input",
+    )
+    render_subtitle_upload_section(tr, uploader_key="auto_subtitle_file_uploader")
+    known_characters = st.text_area(
+        tr("已知角色介绍"),
+        value=st.session_state.get("known_characters", ""),
+        help=tr("可选：输入已知角色、身份、关系，辅助生成剧情理解上下文"),
+        height=120,
+        key="known_characters_input",
+    )
+    plot_context_prompt = st.text_area(
+        tr("全局角色图谱提示词"),
+        value=st.session_state.get("plot_context_prompt", get_default_plot_context_prompt()),
+        help=tr("可编辑：用于根据SRT和角色介绍生成剧情简介、时间轴与全局角色图谱"),
+        height=320,
+        key="plot_context_prompt_input",
+    )
+    render_plot_context_actions(tr, video_theme, movie_title, known_characters, plot_context_prompt)
     custom_prompt = st.text_area(
         tr("Generation Prompt"),
         value=st.session_state.get('video_plot', ''),
@@ -318,79 +341,16 @@ def render_video_details(tr):
             key="vision_batch_size"
         )
     st.session_state['video_theme'] = video_theme
+    st.session_state['movie_title'] = movie_title
+    st.session_state['known_characters'] = known_characters
+    st.session_state['plot_context_prompt'] = plot_context_prompt
     st.session_state['custom_prompt'] = custom_prompt
     return video_theme, custom_prompt
 
 
 def short_drama_summary(tr):
     """短剧解说 渲染视频主题和提示词"""
-    # 检查是否已经处理过字幕文件
-    if 'subtitle_file_processed' not in st.session_state:
-        st.session_state['subtitle_file_processed'] = False
-    
-    subtitle_file = st.file_uploader(
-        tr("上传字幕文件"),
-        type=["srt"],
-        accept_multiple_files=False,
-        key="subtitle_file_uploader"  # 添加唯一key
-    )
-    
-    # 显示当前已上传的字幕文件路径
-    if 'subtitle_path' in st.session_state and st.session_state['subtitle_path']:
-        st.info(f"已上传字幕: {os.path.basename(st.session_state['subtitle_path'])}")
-        if st.button(tr("清除已上传字幕")):
-            st.session_state['subtitle_path'] = None
-            st.session_state['subtitle_content'] = None
-            st.session_state['subtitle_file_processed'] = False
-            st.rerun()
-    
-    # 只有当有文件上传且尚未处理时才执行处理逻辑
-    if subtitle_file is not None and not st.session_state['subtitle_file_processed']:
-        try:
-            # 清理文件名，防止路径污染和路径遍历攻击
-            safe_filename = os.path.basename(subtitle_file.name)
-
-            decoded = decode_subtitle_bytes(subtitle_file.getvalue())
-            script_content = decoded.text
-            detected_encoding = decoded.encoding
-
-            if not script_content:
-                st.error(tr("无法读取字幕文件，请检查文件编码（支持 UTF-8、UTF-16、GBK、GB2312）"))
-                st.stop()
-
-            # 验证字幕内容（简单检查）
-            if len(script_content.strip()) < 10:
-                st.warning(tr("字幕文件内容似乎为空，请检查文件"))
-
-            # 保存到字幕目录
-            script_file_path = os.path.join(utils.subtitle_dir(), safe_filename)
-            file_name, file_extension = os.path.splitext(safe_filename)
-
-            # 如果文件已存在,添加时间戳
-            if os.path.exists(script_file_path):
-                timestamp = time.strftime("%Y%m%d%H%M%S")
-                file_name_with_timestamp = f"{file_name}_{timestamp}"
-                script_file_path = os.path.join(utils.subtitle_dir(), file_name_with_timestamp + file_extension)
-
-            # 直接写入SRT内容（统一使用 UTF-8）
-            with open(script_file_path, "w", encoding='utf-8') as f:
-                f.write(script_content)
-
-            # 更新状态
-            st.success(
-                f"{tr('字幕上传成功')} "
-                f"(编码: {detected_encoding.upper()}, "
-                f"大小: {len(script_content)} 字符)"
-            )
-            st.session_state['subtitle_path'] = script_file_path
-            st.session_state['subtitle_content'] = script_content
-            st.session_state['subtitle_file_processed'] = True  # 标记已处理
-
-            # 避免使用rerun，使用更新状态的方式
-            # st.rerun()
-
-        except Exception as e:
-            st.error(f"{tr('Upload failed')}: {str(e)}")
+    render_subtitle_upload_section(tr, uploader_key="subtitle_file_uploader")
 
     # 名称输入框
     video_theme = st.text_input(tr("短剧名称"))
@@ -399,6 +359,378 @@ def short_drama_summary(tr):
     temperature = st.slider("temperature", 0.0, 2.0, 0.7)
     st.session_state['temperature'] = temperature
     return video_theme
+
+
+def render_subtitle_upload_section(tr, uploader_key: str = "subtitle_file_uploader"):
+    """渲染通用字幕上传区域"""
+    if 'subtitle_file_processed' not in st.session_state:
+        st.session_state['subtitle_file_processed'] = False
+
+    subtitle_file = st.file_uploader(
+        tr("上传字幕文件"),
+        type=["srt"],
+        accept_multiple_files=False,
+        key=uploader_key,
+    )
+
+    if 'subtitle_path' in st.session_state and st.session_state['subtitle_path']:
+        st.info(f"已上传字幕: {os.path.basename(st.session_state['subtitle_path'])}")
+        if st.button(tr("清除已上传字幕"), key=f"{uploader_key}_clear"):
+            st.session_state['subtitle_path'] = None
+            st.session_state['subtitle_content'] = None
+            st.session_state['subtitle_file_processed'] = False
+            st.session_state['plot_context_result'] = None
+            st.session_state['plot_context_result_text'] = ""
+            st.rerun()
+
+    if subtitle_file is not None and not st.session_state['subtitle_file_processed']:
+        try:
+            safe_filename = os.path.basename(subtitle_file.name)
+            decoded = decode_subtitle_bytes(subtitle_file.getvalue())
+            script_content = decoded.text
+            detected_encoding = decoded.encoding
+
+            if not script_content:
+                st.error(tr("无法读取字幕文件，请检查文件编码（支持 UTF-8、UTF-16、GBK、GB2312）"))
+                st.stop()
+
+            if len(script_content.strip()) < 10:
+                st.warning(tr("字幕文件内容似乎为空，请检查文件"))
+
+            script_file_path = os.path.join(utils.subtitle_dir(), safe_filename)
+            file_name, file_extension = os.path.splitext(safe_filename)
+
+            if os.path.exists(script_file_path):
+                timestamp = time.strftime("%Y%m%d%H%M%S")
+                file_name_with_timestamp = f"{file_name}_{timestamp}"
+                script_file_path = os.path.join(utils.subtitle_dir(), file_name_with_timestamp + file_extension)
+
+            with open(script_file_path, "w", encoding='utf-8') as f:
+                f.write(script_content)
+
+            st.success(
+                f"{tr('字幕上传成功')} "
+                f"(编码: {detected_encoding.upper()}, "
+                f"大小: {len(script_content)} 字符)"
+            )
+            st.session_state['subtitle_path'] = script_file_path
+            st.session_state['subtitle_content'] = script_content
+            st.session_state['subtitle_file_processed'] = True
+        except Exception as e:
+            st.error(f"{tr('Upload failed')}: {str(e)}")
+
+
+def render_plot_context_actions(
+    tr,
+    video_theme: str,
+    movie_title: str,
+    known_characters: str,
+    plot_context_prompt: str,
+):
+    """渲染全局角色图谱生成按钮和结果区域"""
+    plot_context_files = _list_plot_context_files()
+    plot_context_options = [("未选择", "")] + [
+        (f"{item['movie_title']} | {item['mtime']} | {item['name']}", item["path"]) for item in plot_context_files
+    ]
+    selected_saved_path = st.selectbox(
+        tr("已保存剧情上下文"),
+        options=[item[1] for item in plot_context_options],
+        index=0,
+        format_func=lambda value: next((label for label, path in plot_context_options if path == value), value or "未选择"),
+        key="plot_context_saved_file_select",
+    )
+    if st.button(tr("加载已保存剧情上下文"), key="load_plot_context_btn", use_container_width=True):
+        if not selected_saved_path:
+            st.warning("请先选择已保存的剧情上下文文件")
+        else:
+            try:
+                payload = _load_plot_context_from_file(selected_saved_path)
+                _set_plot_context_state(payload)
+                st.session_state["plot_context_file_path"] = selected_saved_path
+                st.success(f"已加载剧情上下文: {selected_saved_path}")
+            except ValueError as e:
+                st.error(str(e))
+
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        generate_clicked = st.button(tr("生成全局角色图谱"), key="generate_plot_context_btn", use_container_width=True)
+    with action_cols[1]:
+        clear_clicked = st.button(tr("清空角色图谱结果"), key="clear_plot_context_btn", use_container_width=True)
+
+    if clear_clicked:
+        st.session_state["plot_context_result"] = None
+        st.session_state["plot_context_result_text"] = ""
+        st.session_state["plot_context_file_path"] = ""
+        st.rerun()
+
+    if generate_clicked:
+        subtitle_content = st.session_state.get("subtitle_content", "")
+        subtitle_path = st.session_state.get("subtitle_path", "")
+        if not str(subtitle_content).strip() and not str(subtitle_path).strip():
+            st.error("请先上传字幕文件")
+            st.stop()
+        if not str(movie_title).strip():
+            st.error("请先输入电影名称")
+            st.stop()
+
+        from app.services.documentary.frame_analysis_service import DocumentaryFrameAnalysisService
+
+        service = DocumentaryFrameAnalysisService()
+        try:
+            with st.spinner("正在生成全局角色图谱..."):
+                result = asyncio.run(
+                    service.generate_plot_context(
+                        movie_title=movie_title,
+                        video_theme=video_theme,
+                        subtitle_content=subtitle_content,
+                        subtitle_file_path=subtitle_path,
+                        known_characters=known_characters,
+                        plot_context_prompt=plot_context_prompt,
+                    )
+                )
+            if not result:
+                st.warning("未生成有效的全局角色图谱结果")
+            else:
+                _set_plot_context_state(result, sync_widget_values=True)
+                st.session_state["plot_context_file_path"] = ""
+                st.success("全局角色图谱生成成功")
+        except Exception as e:
+            logger.exception(f"生成全局角色图谱时发生错误\n{traceback.format_exc()}")
+            st.error(f"生成全局角色图谱失败: {str(e)}")
+
+    plot_context_result = st.session_state.get("plot_context_result")
+    if plot_context_result:
+        st.caption(f"当前结果文件: {st.session_state.get('plot_context_file_path', '未保存') or '未保存'}")
+
+        movie_title = st.text_input(
+            tr("电影名称"),
+            value=st.session_state.get("plot_context_movie_title", plot_context_result.get("movie_title", "")),
+            key="plot_context_movie_title",
+        )
+        plot_summary = st.text_area(
+            tr("剧情简介"),
+            value=st.session_state.get("plot_context_plot_summary", plot_context_result.get("plot_summary", "")),
+            height=120,
+            key="plot_context_plot_summary",
+        )
+        timeline_text = st.text_area(
+            tr("时间轴"),
+            value=st.session_state.get(
+                "plot_context_timeline_text",
+                json.dumps(plot_context_result.get("timeline", []), ensure_ascii=False, indent=2),
+            ),
+            height=220,
+            key="plot_context_timeline_text",
+        )
+        characters_text = st.text_area(
+            tr("角色图谱"),
+            value=st.session_state.get(
+                "plot_context_characters_text",
+                json.dumps(plot_context_result.get("characters", []), ensure_ascii=False, indent=2),
+            ),
+            height=320,
+            key="plot_context_characters_text",
+        )
+
+        save_cols = st.columns(2)
+        with save_cols[0]:
+            save_clicked = st.button(tr("保存剧情上下文"), key="save_plot_context_btn", use_container_width=True)
+        with save_cols[1]:
+            sync_clicked = st.button(tr("同步到当前结果"), key="sync_plot_context_btn", use_container_width=True)
+
+        if sync_clicked or save_clicked:
+            try:
+                plot_context_payload = _build_plot_context_payload(
+                    movie_title=movie_title,
+                    plot_summary=plot_summary,
+                    timeline_text=timeline_text,
+                    characters_text=characters_text,
+                )
+                _set_plot_context_state(plot_context_payload, sync_widget_values=False)
+                if save_clicked:
+                    saved_file_path = _save_plot_context_to_file(plot_context_payload, movie_title or video_theme)
+                    st.session_state["plot_context_file_path"] = saved_file_path
+                    st.success(f"剧情上下文已保存: {saved_file_path}")
+                else:
+                    st.session_state["plot_context_file_path"] = ""
+                    st.success("剧情上下文已同步到当前结果")
+            except ValueError as e:
+                st.error(str(e))
+
+        with st.expander(tr("查看完整剧情上下文 JSON"), expanded=False):
+            st.code(
+                st.session_state.get("plot_context_result_text", json.dumps(plot_context_result, ensure_ascii=False, indent=2)),
+                language="json",
+            )
+
+
+def _build_plot_context_payload(
+    *,
+    movie_title: str,
+    plot_summary: str,
+    timeline_text: str,
+    characters_text: str,
+) -> dict:
+    movie_title = (movie_title or "").strip()
+    if not movie_title:
+        raise ValueError("电影名称不能为空")
+
+    try:
+        timeline = json.loads(timeline_text or "[]")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"时间轴不是合法 JSON: {str(e)}") from e
+
+    try:
+        characters = json.loads(characters_text or "[]")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"角色图谱不是合法 JSON: {str(e)}") from e
+
+    if not isinstance(timeline, list):
+        raise ValueError("时间轴必须是 JSON 数组")
+    if not isinstance(characters, list):
+        raise ValueError("角色图谱必须是 JSON 数组")
+
+    return {
+        "movie_title": movie_title,
+        "plot_summary": (plot_summary or "").strip(),
+        "timeline": timeline,
+        "characters": characters,
+    }
+
+
+def _set_plot_context_state(payload: dict, sync_widget_values: bool = True):
+    st.session_state["plot_context_result"] = payload
+    st.session_state["plot_context_result_text"] = json.dumps(payload, ensure_ascii=False, indent=2)
+    if sync_widget_values:
+        st.session_state["plot_context_movie_title"] = payload.get("movie_title", "")
+        st.session_state["plot_context_plot_summary"] = payload.get("plot_summary", "")
+        st.session_state["plot_context_timeline_text"] = json.dumps(payload.get("timeline", []), ensure_ascii=False, indent=2)
+        st.session_state["plot_context_characters_text"] = json.dumps(payload.get("characters", []), ensure_ascii=False, indent=2)
+
+
+def _save_plot_context_to_file(payload: dict, video_theme: str) -> str:
+    base_name = (video_theme or payload.get("movie_title", "") or "plot_context").strip()
+    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in base_name)[:80].strip("_")
+    if not safe_name:
+        safe_name = "plot_context"
+
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    file_path = os.path.join(utils.plot_context_dir(), f"{safe_name}_{timestamp}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return file_path
+
+
+def _list_plot_context_files() -> list[dict]:
+    files = []
+    for name in os.listdir(utils.plot_context_dir()):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(utils.plot_context_dir(), name)
+        if not os.path.isfile(path):
+            continue
+        movie_title = _read_plot_context_movie_title(path)
+        files.append(
+            {
+                "name": name,
+                "path": path,
+                "movie_title": movie_title or "未命名电影",
+                "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(path))),
+            }
+        )
+    files.sort(key=lambda item: os.path.getmtime(item["path"]), reverse=True)
+    return files
+
+
+def _load_plot_context_from_file(file_path: str) -> dict:
+    if not file_path or not os.path.exists(file_path):
+        raise ValueError("剧情上下文文件不存在")
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"剧情上下文文件不是合法 JSON: {str(e)}") from e
+
+    if not isinstance(payload, dict):
+        raise ValueError("剧情上下文文件内容必须是 JSON 对象")
+    if "movie_title" not in payload or "timeline" not in payload or "characters" not in payload:
+        raise ValueError("剧情上下文文件缺少必要字段")
+    return payload
+
+
+def _read_plot_context_movie_title(file_path: str) -> str:
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("movie_title", "")).strip()
+
+
+def get_default_plot_context_prompt() -> str:
+    """获取自动生成全局剧情上下文的默认提示词"""
+    return """# 角色设定
+你是一位资深的剧本拆解师兼数据结构化专家。你的任务是根据零散的影视资料，构建一个严谨、完整且无歧义的【全局剧情上下文 JSON】。这个结构化结果将作为后续 AI 视频剪辑和解说词生成的唯一真理（Source of Truth）。
+
+# 任务目标
+我将为你提供一部影视作品的电影名称、关键角色介绍（可选）以及完整/部分 SRT 字幕。
+你的任务是：
+1. 生成一句到一段可复用的剧情简介，准确概括主线冲突、阶段目标和情绪基调。
+2. 生成时间轴形式的剧情发展，按照字幕时间顺序梳理关键事件，突出转折、冲突升级、人物关系变化与结果。
+3. 构建全局角色图谱：
+   - 录入我提供的已知角色信息。
+   - 从 SRT 中挖掘推动剧情的关键配角、反派和功能角色。
+   - 将同一角色的不同叫法、职业称呼、代词指代、外号进行归一化，统一收录到 aliases 中。
+
+# 分析步骤要求
+1. 通读全局，理解整体故事脉络和阵营关系。
+2. 提取所有对剧情发展有意义的人物实体。
+3. 合并同类项，将指向同一角色的名字、职业、外号、关系称呼合并为一个独立 Character ID。
+4. 梳理角色之间的基础关系、冲突方向、共同目标和敌对关系。
+5. 所有判断必须尽量基于给定字幕与角色介绍；不确定时可保守概括，但不能胡编不存在的情节细节。
+
+# 输出要求
+你必须仅输出一个合法 JSON 对象，不包含 Markdown 代码块，不包含解释文字，不包含注释。
+JSON 必须使用以下结构：
+{
+  "movie_title": "《电影名称》",
+  "plot_summary": "剧情简介",
+  "timeline": [
+    {
+      "start": "00:00:00,000",
+      "end": "00:01:23,000",
+      "event": "该时间段发生的关键剧情",
+      "involved_characters": ["char_01", "char_02"],
+      "relationship_change": "如无变化可为空字符串"
+    }
+  ],
+  "characters": [
+    {
+      "id": "char_01",
+      "is_protagonist": true,
+      "primary_name": "张三",
+      "aliases": ["张警官", "哥哥", "那个疯子", "男主"],
+      "role_archetype": "落魄警察/复仇者",
+      "core_motivation": "抓住当年杀害妻子的凶手",
+      "visual_markers": ["总是穿着脏风衣", "右脸有刀疤"],
+      "initial_relationships": {
+        "char_02": "死敌/猎物",
+        "char_03": "上司，经常产生冲突"
+      }
+    }
+  ]
+}
+
+# 额外约束
+1. movie_title 必须保留书名号格式。
+2. timeline 必须按时间顺序输出，时间格式严格使用 SRT 风格 HH:MM:SS,mmm。
+3. aliases 必须尽可能覆盖字幕中出现过的别称、称呼和职位称谓。
+4. characters 至少包含主角与主要对立角色；如果字幕能识别更多关键人物，也要补齐。
+5. 若已知角色介绍为空，仍需仅基于字幕尽最大可能构建结果。
+6. 所有字段必须存在；缺失信息时用空字符串、空数组或空对象占位。"""
 
 
 def render_script_buttons(tr, params):

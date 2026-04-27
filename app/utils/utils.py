@@ -334,6 +334,15 @@ def subtitle_dir(sub_dir: str = ""):
     return d
 
 
+def plot_context_dir(sub_dir: str = ""):
+    d = storage_dir("plot_contexts", create=True)
+    if sub_dir:
+        d = os.path.join(d, sub_dir)
+    if not os.path.exists(d):
+        os.makedirs(d)
+    return d
+
+
 def split_timestamp(timestamp):
     """
     拆分时间戳

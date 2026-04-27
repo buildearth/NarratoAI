@@ -11,6 +11,7 @@
 
 from .frame_analysis import FrameAnalysisPrompt
 from .narration_generation import NarrationGenerationPrompt
+from .plot_context_generation import PlotContextGenerationPrompt
 from ..manager import PromptManager
 
 
@@ -25,9 +26,14 @@ def register_prompts():
     narration_prompt = NarrationGenerationPrompt()
     PromptManager.register_prompt(narration_prompt, is_default=True)
 
+    # 注册剧情上下文生成提示词
+    plot_context_prompt = PlotContextGenerationPrompt()
+    PromptManager.register_prompt(plot_context_prompt, is_default=True)
+
 
 __all__ = [
     "FrameAnalysisPrompt",
     "NarrationGenerationPrompt",
+    "PlotContextGenerationPrompt",
     "register_prompts"
 ]

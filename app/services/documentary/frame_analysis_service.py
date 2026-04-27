@@ -3,14 +3,16 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from loguru import logger
 
 from app.config import config
 from app.services.documentary.frame_analysis_models import FrameBatchResult
 from app.services.generate_narration_script import generate_narration, parse_frame_analysis_to_markdown
+from app.services.llm.unified_service import UnifiedLLMService
 from app.services.llm.migration_adapter import create_vision_analyzer
+from app.services.prompts import PromptManager
 from app.utils import utils, video_processor
 
 
@@ -39,7 +41,13 @@ JSON 必须包含以下键：
         *,
         video_path: str,
         video_theme: str = "",
+        movie_title: str = "",
         custom_prompt: str = "",
+        plot_context_data: Optional[dict[str, Any]] = None,
+        subtitle_content: str = "",
+        subtitle_file_path: str = "",
+        known_characters: str = "",
+        plot_context_prompt: str = "",
         frame_interval_input: int | float | None = None,
         vision_batch_size: int | None = None,
         vision_llm_provider: str | None = None,
@@ -50,6 +58,17 @@ JSON 必须包含以下键：
         max_concurrency: int | None = None,
     ) -> list[dict]:
         progress = progress_callback or (lambda _p, _m: None)
+        plot_context = plot_context_data
+        if plot_context is None:
+            plot_context = await self.generate_plot_context(
+                movie_title=movie_title,
+                video_theme=video_theme,
+                subtitle_content=subtitle_content,
+                subtitle_file_path=subtitle_file_path,
+                known_characters=known_characters,
+                plot_context_prompt=plot_context_prompt,
+                progress_callback=progress,
+            )
         analysis_result = await self.analyze_video(
             video_path=video_path,
             video_theme=video_theme,
@@ -81,18 +100,42 @@ JSON 必须包含以下键：
             markdown_output=markdown_output,
             video_theme=video_theme,
             custom_prompt=custom_prompt,
+            plot_context=plot_context,
         )
         narration_raw = generate_narration(
             narration_input,
             text_api_key,
             base_url=text_base_url,
             model=text_model,
+            plot_context=self._format_plot_context_for_prompt(plot_context),
         )
         narration_items = self._parse_narration_items(narration_raw)
 
         final_script = [{**item, "OST": 2} for item in narration_items]
         progress(100, "脚本生成完成")
         return final_script
+
+    async def generate_plot_context(
+        self,
+        *,
+        movie_title: str = "",
+        video_theme: str = "",
+        subtitle_content: str = "",
+        subtitle_file_path: str = "",
+        known_characters: str = "",
+        plot_context_prompt: str = "",
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> dict[str, Any] | None:
+        progress = progress_callback or (lambda _p, _m: None)
+        return await self._maybe_generate_plot_context(
+            movie_title=movie_title,
+            video_theme=video_theme,
+            subtitle_content=subtitle_content,
+            subtitle_file_path=subtitle_file_path,
+            known_characters=known_characters,
+            plot_context_prompt=plot_context_prompt,
+            progress_callback=progress,
+        )
 
     async def analyze_video(
         self,
@@ -192,18 +235,31 @@ JSON 必须包含以下键：
 
         return items
 
-    def _build_narration_input(self, *, markdown_output: str, video_theme: str, custom_prompt: str) -> str:
+    def _build_narration_input(
+        self,
+        *,
+        markdown_output: str,
+        video_theme: str,
+        custom_prompt: str,
+        plot_context: Optional[dict[str, Any]] = None,
+    ) -> str:
         context_lines: list[str] = []
         if (video_theme or "").strip():
             context_lines.append(f"视频主题：{video_theme.strip()}")
         if (custom_prompt or "").strip():
             context_lines.append(f"补充创作要求：{custom_prompt.strip()}")
 
-        if not context_lines:
-            return markdown_output
+        blocks = [markdown_output.rstrip()]
 
-        context_block = "\n".join(f"- {line}" for line in context_lines)
-        return f"{markdown_output.rstrip()}\n\n## 创作上下文\n{context_block}\n"
+        plot_context_block = self._format_plot_context_for_narration(plot_context)
+        if plot_context_block:
+            blocks.append(f"## 剧情上下文\n{plot_context_block}")
+
+        if context_lines:
+            context_block = "\n".join(f"- {line}" for line in context_lines)
+            blocks.append(f"## 创作上下文\n{context_block}")
+
+        return "\n\n".join(blocks) + "\n"
 
     def _repair_narration_payload(self, narration_raw: str) -> dict[str, Any] | None:
         def load_json_candidate(payload: str) -> dict[str, Any] | None:
@@ -249,6 +305,114 @@ JSON 必须包含以下键：
         fixed = re.sub(r'""([^"]*?)""', r'"\1"', fixed)
 
         return load_json_candidate(fixed)
+
+    async def _maybe_generate_plot_context(
+        self,
+        *,
+        movie_title: str,
+        video_theme: str,
+        subtitle_content: str,
+        subtitle_file_path: str,
+        known_characters: str,
+        plot_context_prompt: str,
+        progress_callback: Callable[[float, str], None],
+    ) -> dict[str, Any] | None:
+        subtitle_text = (subtitle_content or "").strip()
+        if not subtitle_text and subtitle_file_path and os.path.exists(subtitle_file_path):
+            from app.services.subtitle_text import read_subtitle_text
+
+            subtitle_text = read_subtitle_text(subtitle_file_path).text.strip()
+
+        if not subtitle_text:
+            return None
+
+        text_provider = config.app.get("text_llm_provider", "openai").lower()
+        text_api_key = config.app.get(f"text_{text_provider}_api_key")
+        text_model = config.app.get(f"text_{text_provider}_model_name")
+        text_base_url = config.app.get(f"text_{text_provider}_base_url")
+        if not text_api_key or not text_model:
+            logger.warning("文本模型未配置完整，跳过剧情上下文生成")
+            return None
+
+        progress_callback(8, "正在根据字幕生成剧情上下文...")
+        prompt = PromptManager.get_prompt(
+            category="documentary",
+            name="plot_context_generation",
+            parameters={
+                "movie_title": self._normalize_movie_title(movie_title or video_theme),
+                "known_characters": (known_characters or "").strip() or "无",
+                "subtitle_content": subtitle_text,
+                "custom_instruction": (plot_context_prompt or "").strip(),
+            },
+        )
+        result = await UnifiedLLMService.generate_text(
+            prompt=prompt,
+            system_prompt="你是一位资深的剧本拆解师兼数据结构化专家，只能输出合法JSON对象。",
+            provider=text_provider,
+            temperature=0.4,
+            response_format="json",
+            api_key=text_api_key,
+            api_base=text_base_url,
+        )
+        parsed = self._repair_narration_payload(result)
+        if not isinstance(parsed, dict):
+            raise ValueError("剧情上下文生成失败：返回内容不是合法 JSON 对象")
+        return parsed
+
+    def _normalize_movie_title(self, video_theme: str) -> str:
+        title = (video_theme or "").strip() or "未命名作品"
+        if title.startswith("《") and title.endswith("》"):
+            return title
+        return f"《{title}》"
+
+    def _format_plot_context_for_narration(self, plot_context: Optional[dict[str, Any]]) -> str:
+        if not plot_context:
+            return ""
+
+        lines: list[str] = []
+        movie_title = plot_context.get("movie_title", "")
+        plot_summary = plot_context.get("plot_summary", "")
+        timeline = plot_context.get("timeline") or []
+        characters = plot_context.get("characters") or []
+
+        if movie_title:
+            lines.append(f"- 片名：{movie_title}")
+        if plot_summary:
+            lines.append(f"- 剧情简介：{plot_summary}")
+
+        if timeline:
+            lines.append("- 时间轴：")
+            for item in timeline[:8]:
+                start = item.get("start", "")
+                end = item.get("end", "")
+                event = item.get("event", "")
+                change = item.get("relationship_change", "")
+                involved = "、".join(item.get("involved_characters") or [])
+                text = f"  - {start}-{end} {event}".strip()
+                if involved:
+                    text += f" | 角色: {involved}"
+                if change:
+                    text += f" | 关系变化: {change}"
+                lines.append(text)
+
+        if characters:
+            lines.append("- 角色图谱：")
+            for item in characters[:12]:
+                name = item.get("primary_name", "")
+                aliases = "、".join(item.get("aliases") or [])
+                role = item.get("role_archetype", "")
+                motive = item.get("core_motivation", "")
+                relation_count = len(item.get("initial_relationships") or {})
+                lines.append(
+                    f"  - {item.get('id', '')} {name} | 原型: {role} | 动机: {motive} | 别名: {aliases} | 关系数: {relation_count}"
+                )
+
+        return "\n".join(lines).strip()
+
+    def _format_plot_context_for_prompt(self, plot_context: Optional[dict[str, Any]]) -> str:
+        if not plot_context:
+            return ""
+        return json.dumps(plot_context, ensure_ascii=False, indent=2)
 
     def _resolve_frame_interval(self, frame_interval_input: int | float | None) -> float:
         interval = frame_interval_input

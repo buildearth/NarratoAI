@@ -1,7 +1,7 @@
 import unittest
 import os
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.services.documentary.frame_analysis_models import DocumentaryAnalysisConfig
 from app.services.documentary.frame_analysis_service import DocumentaryFrameAnalysisService
@@ -214,6 +214,51 @@ class DocumentaryFrameAnalysisServiceTests(unittest.TestCase):
         expected_prefix = utils.md5("video.mp4" + "123.0")
         self.assertTrue(key.startswith(expected_prefix))
 
+    def test_build_narration_input_includes_plot_context_block(self):
+        service = DocumentaryFrameAnalysisService()
+
+        narration_input = service._build_narration_input(
+            markdown_output="## 片段 1\n- 时间范围：00:00:00,000-00:00:03,000",
+            video_theme="测试影片",
+            custom_prompt="强调悬念",
+            plot_context={
+                "movie_title": "《测试影片》",
+                "plot_summary": "一名男人深夜回家时发现异常。",
+                "timeline": [
+                    {
+                        "start": "00:00:00,000",
+                        "end": "00:00:10,000",
+                        "event": "男人回家",
+                        "involved_characters": ["char_01"],
+                        "relationship_change": "",
+                    }
+                ],
+                "characters": [
+                    {
+                        "id": "char_01",
+                        "primary_name": "张三",
+                        "aliases": ["男人"],
+                        "role_archetype": "普通人",
+                        "core_motivation": "查明真相",
+                        "initial_relationships": {},
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("## 剧情上下文", narration_input)
+        self.assertIn("剧情简介：一名男人深夜回家时发现异常。", narration_input)
+        self.assertIn("角色图谱", narration_input)
+
+    def test_format_plot_context_for_prompt_returns_json_string(self):
+        service = DocumentaryFrameAnalysisService()
+        plot_context = {"movie_title": "《测试影片》", "plot_summary": "简介", "timeline": [], "characters": []}
+
+        result = service._format_plot_context_for_prompt(plot_context)
+
+        self.assertIn('"movie_title": "《测试影片》"', result)
+        self.assertIn('"plot_summary": "简介"', result)
+
     def test_clear_keyframes_cache_respects_scope_and_prefix_match(self):
         with TemporaryDirectory() as temp_root:
             service = DocumentaryFrameAnalysisService()
@@ -273,3 +318,79 @@ class DocumentaryAnalysisConfigTests(unittest.TestCase):
                 vision_model_name="gpt-4o-mini",
                 max_concurrency=0,
             )
+
+
+class DocumentaryPlotContextGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_maybe_generate_plot_context_returns_none_without_subtitle(self):
+        service = DocumentaryFrameAnalysisService()
+
+        result = await service._maybe_generate_plot_context(
+            movie_title="《测试影片》",
+            video_theme="测试影片",
+            subtitle_content="",
+            subtitle_file_path="",
+            known_characters="",
+            plot_context_prompt="",
+            progress_callback=lambda _p, _m: None,
+        )
+
+        self.assertIsNone(result)
+
+    async def test_maybe_generate_plot_context_builds_structured_result(self):
+        service = DocumentaryFrameAnalysisService()
+        llm_output = '{"movie_title":"《测试影片》","plot_summary":"简介","timeline":[],"characters":[]}'
+
+        with patch.dict(
+            "app.services.documentary.frame_analysis_service.config.app",
+            {
+                "text_llm_provider": "openai",
+                "text_openai_api_key": "test-key",
+                "text_openai_model_name": "test-model",
+                "text_openai_base_url": "https://example.com/v1",
+            },
+        ), patch(
+            "app.services.documentary.frame_analysis_service.UnifiedLLMService.generate_text",
+            AsyncMock(return_value=llm_output),
+        ) as mocked_generate:
+            result = await service._maybe_generate_plot_context(
+                movie_title="《测试影片》",
+                video_theme="测试影片",
+                subtitle_content="1\n00:00:00,000 --> 00:00:02,000\n你好\n",
+                subtitle_file_path="",
+                known_characters="张三：男主",
+                plot_context_prompt="默认提示词",
+                progress_callback=lambda _p, _m: None,
+            )
+
+        self.assertEqual("《测试影片》", result["movie_title"])
+        self.assertEqual("简介", result["plot_summary"])
+        self.assertEqual("openai", mocked_generate.call_args.kwargs["provider"])
+
+    async def test_generate_plot_context_prefers_explicit_movie_title_over_video_theme(self):
+        service = DocumentaryFrameAnalysisService()
+        llm_output = '{"movie_title":"《显式片名》","plot_summary":"简介","timeline":[],"characters":[]}'
+
+        with patch.dict(
+            "app.services.documentary.frame_analysis_service.config.app",
+            {
+                "text_llm_provider": "openai",
+                "text_openai_api_key": "test-key",
+                "text_openai_model_name": "test-model",
+                "text_openai_base_url": "https://example.com/v1",
+            },
+        ), patch(
+            "app.services.documentary.frame_analysis_service.PromptManager.get_prompt",
+            return_value="prompt",
+        ) as mocked_prompt, patch(
+            "app.services.documentary.frame_analysis_service.UnifiedLLMService.generate_text",
+            AsyncMock(return_value=llm_output),
+        ):
+            await service.generate_plot_context(
+                movie_title="显式片名",
+                video_theme="主题名",
+                subtitle_content="1\n00:00:00,000 --> 00:00:02,000\n你好\n",
+                known_characters="",
+                plot_context_prompt="默认提示词",
+            )
+
+        self.assertEqual("《显式片名》", mocked_prompt.call_args.kwargs["parameters"]["movie_title"])
